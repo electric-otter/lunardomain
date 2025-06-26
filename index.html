@@ -8,12 +8,9 @@
   <style>
     body { font-family: monospace; background: #111; color: #fff; }
     input, button, textarea { font-size: 1em; }
-    #site-viewer { margin-top: 2em; background: #222; padding: 1em; border-radius: 8px; min-height: 200px; }
     #register-form { margin-top: 2em; background: #222; padding: 1em; border-radius: 8px; }
     a, a:visited { color: #89f; }
     .info { color: #aaa; font-size: small; }
-    #mirror-btn, #open-newtab-btn { margin-top: 1em; }
-    iframe { width: 100%; height: 400px; border: none; background: #fff; }
   </style>
 </head>
 <body>
@@ -22,8 +19,10 @@
     <input id="domain-input" placeholder="Enter .lunar domain (e.g. mysite.lunar)" required />
     <button type="submit">Visit</button>
   </form>
-  <div id="site-viewer">Enter a .lunar domain to get started.</div>
-
+  <div class="info" style="margin-top:2em;">
+    <b>How it works:</b> When you register, your HTML is seeded as a WebTorrent and the magnet URI is published to GUN. Visitors fetch your HTML via WebTorrent. Anyone can "mirror" a site, seeding it themselves and adding their magnet link as a mirror.<br>
+    <b>Now, when you visit a .lunar domain, the site will instantly open in a new tab!</b>
+  </div>
   <form id="register-form">
     <h3>Register your .lunar domain</h3>
     <input id="reg-domain" placeholder="mysite.lunar" required />
@@ -31,12 +30,6 @@
     <button type="submit">Register</button>
     <div class="info">(This seeds your site HTML via WebTorrent and maps your .lunar domain to your magnet URI. Others will fetch your HTML via WebTorrent!)</div>
   </form>
-
-  <div class="info" style="margin-top:2em;">
-    <b>How it works:</b> When you register, your HTML is seeded as a WebTorrent and the magnet URI is published to GUN. Visitors fetch your HTML via WebTorrent. Anyone can "mirror" a site, seeding it themselves and adding their magnet link as a mirror.<br>
-    <b>Now, you can also open .lunar sites in a new tab as a true proxy!</b>
-  </div>
-
   <script>
     // GUN for lightweight metadata (magnet URIs, mirrors)
     const gun = Gun();
@@ -93,25 +86,50 @@
         return;
       }
       const file = new File([html], "index.html", { type: "text/html" });
-      client.seed(file, torrent => {
-        setDomainOwner(domain, myMAC);
-        saveMagnet(myMAC, torrent.magnetURI);
-        addMirror(domain, myMAC);
-        alert(`Registered ${domain}, now seeding via WebTorrent!\nMagnet: ${torrent.magnetURI}`);
+      // Prevent duplicate seed error
+      let infoHash;
+      const tmpClient = new WebTorrent();
+      tmpClient.seed(file, { announce: [] }, torrent => {
+        infoHash = torrent.infoHash;
+        tmpClient.destroy();
+        if (!client.get(infoHash)) {
+          client.seed(file, t => {
+            setDomainOwner(domain, myMAC);
+            saveMagnet(myMAC, t.magnetURI);
+            addMirror(domain, myMAC);
+            alert(`Registered ${domain}, now seeding via WebTorrent!\nMagnet: ${t.magnetURI}`);
+          });
+        } else {
+          setDomainOwner(domain, myMAC);
+          saveMagnet(myMAC, client.get(infoHash).magnetURI);
+          addMirror(domain, myMAC);
+          alert(`Registered ${domain}, already seeding via WebTorrent!`);
+        }
       });
     };
 
-    // Mirroring logic: seed HTML and register as mirror
+    // Mirroring logic: seed HTML and register as mirror (also prevents duplicate)
     function mirrorSite(domain, html) {
       const file = new File([html], "index.html", { type: "text/html" });
-      client.seed(file, torrent => {
-        saveMagnet(myMAC, torrent.magnetURI);
-        addMirror(domain, myMAC);
-        alert('You are now mirroring this site via WebTorrent!\nMagnet: ' + torrent.magnetURI);
+      let infoHash;
+      const tmpClient = new WebTorrent();
+      tmpClient.seed(file, { announce: [] }, torrent => {
+        infoHash = torrent.infoHash;
+        tmpClient.destroy();
+        if (!client.get(infoHash)) {
+          client.seed(file, t => {
+            saveMagnet(myMAC, t.magnetURI);
+            addMirror(domain, myMAC);
+            alert('You are now mirroring this site via WebTorrent!\nMagnet: ' + t.magnetURI);
+          });
+        } else {
+          saveMagnet(myMAC, client.get(infoHash).magnetURI);
+          addMirror(domain, myMAC);
+          alert('You are now mirroring this site via WebTorrent!');
+        }
       });
     }
 
-    // Load a .lunar domain: try owner, then mirrors
     document.getElementById('domain-form').onsubmit = function(e) {
       e.preventDefault();
       const domain = document.getElementById('domain-input').value.trim().toLowerCase();
@@ -119,12 +137,11 @@
         alert('Only .lunar domains are supported.');
         return;
       }
-      document.getElementById('site-viewer').innerHTML = 'Loading...';
       getDomainOwner(domain, mac => {
         if (mac) {
           loadMagnet(mac, magnet => {
             if (magnet) {
-              fetchAndShow(domain, magnet, mac, true);
+              fetchAndOpenNewTab(domain, magnet, mac, true);
             } else {
               tryMirrors(domain, mac);
             }
@@ -139,23 +156,19 @@
       getMirrors(domain, macs => {
         if (excludeMac) macs = macs.filter(mac => mac !== excludeMac);
         if (macs.length === 0) {
-          document.getElementById('site-viewer').innerHTML =
-            `<p>No .lunar site registered for <b>${domain}</b> and no mirrors found.</p>`;
+          alert(`No .lunar site registered for ${domain} and no mirrors found.`);
           return;
         }
         let found = false, i = 0;
         function tryNext() {
           if (i >= macs.length) {
-            if (!found) {
-              document.getElementById('site-viewer').innerHTML =
-                `<p>Mirrors found for <b>${domain}</b>, but none have the site content.</p>`;
-            }
+            if (!found) alert(`Mirrors found for ${domain}, but none have the site content.`);
             return;
           }
           const mac = macs[i++];
           loadMagnet(mac, magnet => {
             if (magnet) {
-              fetchAndShow(domain, magnet, mac, false, true);
+              fetchAndOpenNewTab(domain, magnet, mac, false, true);
               found = true;
             } else {
               tryNext();
@@ -166,71 +179,47 @@
       });
     }
 
-    // Fetch HTML via WebTorrent and display in iframe + provide new tab proxy
-    function fetchAndShow(domain, magnet, mac, isOwner, isMirror) {
-      document.getElementById('site-viewer').innerHTML = 'Fetching HTML via WebTorrent...';
-      client.add(magnet, torrent => {
+    // Fetch HTML via WebTorrent and open in new tab (no iframe in current page)
+    function fetchAndOpenNewTab(domain, magnet, mac, isOwner, isMirror) {
+      let infoHash = /btih:([a-fA-F0-9]{40,})/.exec(magnet);
+      infoHash = infoHash ? infoHash[1].toLowerCase() : null;
+      if (client.get(infoHash)) {
+        // Already added, use existing torrent
+        useTorrent(client.get(infoHash));
+      } else {
+        client.add(magnet, useTorrent);
+      }
+      function useTorrent(torrent) {
         const htmlFile = torrent.files.find(f => f.name.endsWith('.html'));
         if (!htmlFile) {
-          document.getElementById('site-viewer').innerHTML =
-            `<p>Peer found, but no HTML file in torrent!</p>`;
+          alert('Peer found, but no HTML file in torrent!');
           return;
         }
-        htmlFile.getBlobURL((err, url) => {
+        htmlFile.getBlob((err, blob) => {
           if (err) {
-            document.getElementById('site-viewer').innerHTML = `<p>Error loading site: ${err}</p>`;
+            alert('Error loading site: ' + err);
             return;
           }
-          htmlFile.getBlob((err, blob) => {
-            if (err) {
-              document.getElementById('site-viewer').innerHTML =
-                `<p>Error loading site: ${err}</p>`;
-              return;
-            }
-            // Button to open in a new tab
-            const openNewTabHandler = () => {
-              const blobUrl = URL.createObjectURL(blob);
-              const viewerBlob = new Blob([`
-                <!DOCTYPE html>
-                <html>
-                <head>
-                  <meta charset="utf-8">
-                  <title>${domain}</title>
-                  <style>body {margin:0;} iframe {width:100vw; height:100vh; border:none;}</style>
-                </head>
-                <body>
-                  <iframe src="${blobUrl}" sandbox="allow-scripts allow-same-origin"></iframe>
-                </body>
-                </html>
-              `], {type: "text/html"});
-              const viewerUrl = URL.createObjectURL(viewerBlob);
-              window.open(viewerUrl, '_blank');
-            };
-
-            document.getElementById('site-viewer').innerHTML =
-              `<iframe sandbox="allow-scripts allow-same-origin" src="${url}"></iframe>
-              <div class="info">${isOwner ? 'Loaded from owner: ' : 'Loaded from mirror: '}${mac}</div>
-              <button id="open-newtab-btn">Open .lunar site in new tab</button>
-              ${isOwner || isMirror ? '' :
-                `<button id="mirror-btn">Mirror this site</button>
-                 <div class="info">Help keep this site alive by mirroring it.</div>`}`;
-            document.getElementById('open-newtab-btn').onclick = openNewTabHandler;
-            if (!isOwner && !isMirror) {
-              document.getElementById('mirror-btn').onclick = function() {
-                // Download HTML as text and seed as new mirror
-                htmlFile.getBlob((err, blob2) => {
-                  if (err) return alert('Error downloading: ' + err);
-                  const reader = new FileReader();
-                  reader.onload = function(e) {
-                    mirrorSite(domain, e.target.result);
-                  };
-                  reader.readAsText(blob2);
-                });
-              };
-            }
-          });
+          // Create a new viewer page as a Blob and open it
+          const blobUrl = URL.createObjectURL(blob);
+          const viewerHtml = `
+            <!DOCTYPE html>
+            <html>
+            <head>
+              <meta charset="utf-8">
+              <title>${domain}</title>
+              <style>body {margin:0;} iframe {width:100vw; height:100vh; border:none;}</style>
+            </head>
+            <body>
+              <iframe src="${blobUrl}" sandbox="allow-scripts allow-same-origin"></iframe>
+            </body>
+            </html>
+          `;
+          const viewerBlob = new Blob([viewerHtml], {type: "text/html"});
+          const viewerUrl = URL.createObjectURL(viewerBlob);
+          window.open(viewerUrl, '_blank');
         });
-      });
+      }
     }
   </script>
 </body>
