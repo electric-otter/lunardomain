@@ -2,9 +2,10 @@
 <html>
 <head>
   <meta charset="UTF-8">
-  <title>LunarDomain .lunar Portal (IPFS, New Tabs, Cloud Regions)</title>
+  <title>LunarDomain .lunar Portal (IPFS, PeerJS, IndexedDB, New Tabs, Cloud Regions)</title>
   <script src="https://cdn.jsdelivr.net/npm/gun/gun.js"></script>
   <script src="https://unpkg.com/ipfs/dist/index.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.2/dist/peerjs.min.js"></script>
   <style>
     body { font-family: monospace; background: #111; color: #fff; }
     input, button, textarea, select { font-size: 1em; }
@@ -15,6 +16,7 @@
 </head>
 <body>
   <h1>🌙 LunarDomain .lunar Portal</h1>
+  <div id="peerid-section" class="info"></div>
   <form id="domain-form">
     <input id="domain-input" placeholder="Enter .lunar domain (e.g. mysite.lunar)" required />
     <select id="region-view">
@@ -37,19 +39,19 @@
     </select>
     <button type="submit">Publish</button>
     <div class="info">
-      Uploads files to IPFS and registers the domain mapping in GunDB. <br>
+      Uploads files to IPFS, stores them in IndexedDB and registers the domain mapping in GunDB and PeerJS. <br>
       Choose a region to publish (simulated “cloud” region). Others can publish/mirror your site in new regions.<br>
-      When visiting, your site will open in a new tab!
+      When visiting, your site will open in a new tab and will try PeerJS, IPFS & local IndexedDB for loading!
     </div>
   </form>
   <div class="info" style="margin-top:2em;">
-    <b>How it works:</b> Register a domain and upload your files. Your site is uploaded to IPFS and your .lunar domain is mapped to the region + CID in GunDB.<br>
+    <b>How it works:</b> Register a domain and upload your files. Your site is uploaded to IPFS, your .lunar domain is mapped to the region + CID in GunDB, and can be retrieved from PeerJS and local IndexedDB.<br>
     Anyone can publish/mirror your site to a new region. <br>
-    When anyone enters your .lunar domain and picks a region, the portal opens a new tab with a viewer that loads your files from IPFS.<br>
+    When anyone enters your .lunar domain and picks a region, the portal opens a new tab with a viewer that loads your files from PeerJS, IPFS, or local cache.<br>
     <b>NO iframes. Sites are always opened in new tabs!</b>
   </div>
   <script>
-    // GunDB: domain/region -> file metadata (list of {name, cid, type})
+    // GunDB: domain/region -> file metadata (list of {name, cid, type, peerid})
     const gun = Gun();
 
     // Regions (add more as needed)
@@ -60,6 +62,40 @@
       asia: "🌏 Asia"
     };
 
+    // IndexedDB utility
+    function dbPut(domain, region, blobs) {
+      return new Promise((resolve, reject) => {
+        const request = indexedDB.open("lunarSites", 1);
+        request.onupgradeneeded = function() {
+          request.result.createObjectStore("sites", { keyPath: "key" });
+        };
+        request.onerror = () => reject(request.error);
+        request.onsuccess = function() {
+          const db = request.result;
+          const tx = db.transaction("sites", "readwrite");
+          const store = tx.objectStore("sites");
+          store.put({ key: domain+"::"+region, blobs });
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+        };
+      });
+    }
+    function dbGet(domain, region) {
+      return new Promise((resolve, reject) => {
+        const request = indexedDB.open("lunarSites", 1);
+        request.onupgradeneeded = function() { request.result.createObjectStore("sites", { keyPath: "key" }); };
+        request.onerror = () => reject(request.error);
+        request.onsuccess = function() {
+          const db = request.result;
+          const tx = db.transaction("sites", "readonly");
+          const store = tx.objectStore("sites");
+          const getReq = store.get(domain+"::"+region);
+          getReq.onsuccess = () => resolve(getReq.result ? getReq.result.blobs : []);
+          getReq.onerror = () => reject(getReq.error);
+        };
+      });
+    }
+
     // IPFS node
     let ipfs;
     (async () => {
@@ -67,18 +103,39 @@
       console.log("IPFS node started");
     })();
 
-    // GunDB mapping: domain+region -> [ {name, cid, type} ]
-    function setDomainRegionBlobs(domain, region, blobs) {
-      gun.get('lunar_registry').get(domain + "::" + region).put({ blobs: JSON.stringify(blobs) });
+    // PeerJS
+    let peer;
+    let myPeerId = null;
+    let peerSites = {}; // key: domain+region, value: blobs
+    function createPeer() {
+      peer = new Peer(undefined, {debug: 2});
+      peer.on('open', id => {
+        myPeerId = id;
+        document.getElementById('peerid-section').textContent = `Your PeerJS ID: ${myPeerId}`;
+      });
+      peer.on('connection', conn => {
+        conn.on('data', (msg) => {
+          if (msg.type === 'getSite' && peerSites[msg.key]) {
+            conn.send({ type: 'site', key: msg.key, blobs: peerSites[msg.key] });
+          }
+        });
+      });
+    }
+    createPeer();
+
+    // GunDB mapping: domain+region -> [ {name, cid, type, peerid} ]
+    function setDomainRegionBlobs(domain, region, blobs, peerid) {
+      let blobsWithPeer = blobs.map(x => ({...x, peerid}));
+      gun.get('lunar_registry').get(domain + "::" + region).put({ blobs: JSON.stringify(blobsWithPeer), peerid });
     }
     function getDomainRegionBlobs(domain, region, cb) {
       gun.get('lunar_registry').get(domain + "::" + region).once(data => {
-        if (!data || !data.blobs) return cb([]);
-        try { cb(JSON.parse(data.blobs)); } catch { cb([]); }
+        if (!data || !data.blobs) return cb([], null);
+        try { cb(JSON.parse(data.blobs), data.peerid || null); } catch { cb([], null); }
       });
     }
 
-    // Allow users to register/upload new files for their domain, and set region
+    // Register/upload new files for domain, and set region. Store in IndexedDB, IPFS, PeerJS, Gun
     document.getElementById('register-form').onsubmit = async function(e) {
       e.preventDefault();
       const domain = document.getElementById('reg-domain').value.trim().toLowerCase();
@@ -101,11 +158,13 @@
         const { cid } = await ipfs.add({ path: file.name, content: file });
         blobs.push({ name: file.name, cid: cid.toString(), type: file.type });
       }
-      setDomainRegionBlobs(domain, region, blobs);
-      alert(`Published! Domain: ${domain} in region ${REGIONS[region]} with files: ${blobs.map(b=>b.name).join(', ')}`);
+      await dbPut(domain, region, blobs);
+      setDomainRegionBlobs(domain, region, blobs, myPeerId || "");
+      peerSites[domain+"::"+region] = blobs;
+      alert(`Published! Domain: ${domain} in region ${REGIONS[region]} with files: ${blobs.map(b=>b.name).join(', ')} (PeerID: ${myPeerId})`);
     };
 
-    // Visit: resolve domain+region, fetch blobs from IPFS, open in new tab
+    // Visit: resolve domain+region, try PeerJS, then IndexedDB, then IPFS, open in new tab
     document.getElementById('domain-form').onsubmit = function(e) {
       e.preventDefault();
       const domain = document.getElementById('domain-input').value.trim().toLowerCase();
@@ -114,52 +173,96 @@
         alert('Only .lunar domains are supported.');
         return;
       }
-      getDomainRegionBlobs(domain, region, async blobs => {
-        if (!blobs.length) {
-          alert(`No files registered for ${domain} in region ${REGIONS[region]}.`);
-          return;
-        }
-        // Find HTML file (if any)
-        let htmlBlob = blobs.find(b => b.name.endsWith('.html'));
-        let html = "";
-        if (htmlBlob && ipfs) {
-          for await (const chunk of ipfs.cat(htmlBlob.cid)) {
-            html += new TextDecoder().decode(chunk);
+      getDomainRegionBlobs(domain, region, async (blobs, peerid) => {
+        if (blobs.length && peerid && peerid !== myPeerId) {
+          // Try PeerJS fetch first
+          let got = false;
+          try {
+            const conn = peer.connect(peerid, {serialization: "json"});
+            conn.on('open', () => {
+              conn.send({ type: 'getSite', key: domain+"::"+region });
+            });
+            conn.on('data', msg => {
+              if (msg.type === 'site' && msg.key === domain+"::"+region && msg.blobs && msg.blobs.length) {
+                got = true;
+                openViewerTab(domain, region, msg.blobs, REGIONS[region]);
+                conn.close();
+              }
+            });
+            setTimeout(async () => {
+              if (!got) {
+                // Try IndexedDB fallback
+                let cached = await dbGet(domain, region);
+                if (cached.length) {
+                  openViewerTab(domain, region, cached, REGIONS[region]);
+                } else {
+                  // Fallback to IPFS
+                  openViewerTab(domain, region, blobs, REGIONS[region]);
+                }
+              }
+            }, 3000);
+          } catch {
+            let cached = await dbGet(domain, region);
+            if (cached.length) {
+              openViewerTab(domain, region, cached, REGIONS[region]);
+            } else {
+              openViewerTab(domain, region, blobs, REGIONS[region]);
+            }
           }
+        } else if (blobs.length) {
+          // Try IndexedDB fallback
+          let cached = await dbGet(domain, region);
+          if (cached.length) {
+            openViewerTab(domain, region, cached, REGIONS[region]);
+          } else {
+            openViewerTab(domain, region, blobs, REGIONS[region]);
+          }
+        } else {
+          alert(`No files registered for ${domain} in region ${REGIONS[region]}.`);
         }
-        // Build new tab viewer page as a blob
-        let links = blobs.map(b =>
-          `<a class="blob-link" href="https://ipfs.io/ipfs/${b.cid}" target="_blank">${b.name} (${b.type||'blob'})</a>`
-        ).join('');
-        let viewerHtml = `
+      });
+    };
+
+    // Open viewer as a blob in a new tab
+    function openViewerTab(domain, region, blobs, regionLabel) {
+      let htmlBlob = blobs.find(b => b.name.endsWith('.html'));
+      let links = blobs.map(b =>
+        `<a class="blob-link" href="https://ipfs.io/ipfs/${b.cid}" target="_blank">${b.name} (${b.type||'blob'})</a>`
+      ).join('');
+      let viewerHtml = `
 <!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8">
-  <title>${domain} - LunarDomain Viewer (${REGIONS[region]})</title>
+  <title>${domain} - LunarDomain Viewer (${regionLabel})</title>
+  <script src="https://unpkg.com/ipfs/dist/index.min.js"></script>
   <style>
     body { background: #111; color: #fff; font-family: monospace; margin:0; padding:2em;}
     .blob-link { margin:0.5em 0; display:block; }
   </style>
 </head>
 <body>
-  <h2>${domain} in ${REGIONS[region]}</h2>
-  ${html ? `<div><a href="#" id="open-site">Open Site (HTML)</a></div>` : ''}
+  <h2>${domain} in ${regionLabel}</h2>
+  ${htmlBlob ? `<div><a href="#" id="open-site">Open Site (HTML)</a></div>` : ''}
   <div>
     <h4>All Files:</h4>
     ${links}
   </div>
-  <div class="info">Loaded from IPFS. <a href="#" id="mirror-btn">Mirror to another region</a></div>
+  <div class="info">Loaded from PeerJS/IPFS/IndexedDB. <a href="#" id="mirror-btn">Mirror to another region</a></div>
   <script>
-    // Open HTML (if available) as standalone doc
-    ${html ? `
-    document.getElementById('open-site').onclick = function(e) {
+    ${htmlBlob ? `
+    document.getElementById('open-site').onclick = async function(e) {
       e.preventDefault();
-      const blobUrl = URL.createObjectURL(new Blob([${JSON.stringify(html)}], {type:'text/html'}));
+      const ipfs = await window.Ipfs.create();
+      let html = "";
+      for await (const chunk of ipfs.cat(${JSON.stringify(htmlBlob.cid)})) {
+        html += new TextDecoder().decode(chunk);
+      }
+      const blobUrl = URL.createObjectURL(new Blob([html], {type:'text/html'}));
       window.open(blobUrl, '_blank');
     };
     ` : ''}
-    // Mirror: user picks a region, registers same blobs to that region in GunDB
+    // Mirror: user picks a region, registers same blobs to that region in GunDB via opener
     document.getElementById('mirror-btn').onclick = function(e) {
       e.preventDefault();
       let region = prompt('Enter region code to mirror to (global/us/eu/asia):');
@@ -179,17 +282,16 @@
   <\/script>
 </body>
 </html>
-        `;
-        // Open viewer as a blob in a new tab
-        const blob = new Blob([viewerHtml], {type:"text/html"});
-        const url = URL.createObjectURL(blob);
-        window.open(url, '_blank');
-      });
-    };
-
+      `;
+      const blob = new Blob([viewerHtml], {type:"text/html"});
+      const url = URL.createObjectURL(blob);
+      window.open(url, '_blank');
+    }
     // Expose for mirroring from viewer tab
     window.mirrorToRegion = function(domain, region, blobs) {
-      setDomainRegionBlobs(domain, region, blobs);
+      setDomainRegionBlobs(domain, region, blobs, myPeerId || "");
+      dbPut(domain, region, blobs);
+      peerSites[domain+"::"+region] = blobs;
     };
   </script>
 </body>
