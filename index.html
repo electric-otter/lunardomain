@@ -2,38 +2,63 @@
 <html>
 <head>
   <meta charset="UTF-8">
-  <title>LunarDomain: Decentralized .lunar Sites (IPFS + Blockchain)</title>
-  <script src="https://unpkg.com/ipfs/dist/index.min.js"></script>
+  <title>LunarDomain .lunar Portal (IPFS, New Tabs, Cloud Regions)</title>
   <script src="https://cdn.jsdelivr.net/npm/gun/gun.js"></script>
+  <script src="https://unpkg.com/ipfs/dist/index.min.js"></script>
   <style>
     body { font-family: monospace; background: #111; color: #fff; }
-    input, button, textarea { font-size: 1em; }
-    #register-form, #site-viewer { margin-top: 2em; background: #222; padding: 1em; border-radius: 8px; }
+    input, button, textarea, select { font-size: 1em; }
+    #register-form { margin-top: 2em; background: #222; padding: 1em; border-radius: 8px; }
     .info { color: #aaa; font-size: small; }
-    iframe { width: 100%; height: 400px; border: none; background: #fff; }
+    .blob-link { margin: 0.5em 0; display: block; }
   </style>
 </head>
 <body>
-  <h1>🌙 LunarDomain .lunar (IPFS + Blockchain)</h1>
+  <h1>🌙 LunarDomain .lunar Portal</h1>
   <form id="domain-form">
     <input id="domain-input" placeholder="Enter .lunar domain (e.g. mysite.lunar)" required />
-    <button type="submit">Visit</button>
+    <select id="region-view">
+      <option value="global">🌐 Global</option>
+      <option value="us">🇺🇸 US</option>
+      <option value="eu">🇪🇺 EU</option>
+      <option value="asia">🌏 Asia</option>
+    </select>
+    <button type="submit">Visit (new tab)</button>
   </form>
-  <div id="site-viewer">Enter a .lunar domain to get started.</div>
   <form id="register-form">
     <h3>Register your .lunar domain</h3>
     <input id="reg-domain" placeholder="mysite.lunar" required />
-    <textarea id="reg-html" placeholder="Your site HTML" required style="width:100%;height:100px;"></textarea><br>
+    <input type="file" id="reg-files" multiple />
+    <select id="region-publish">
+      <option value="global">🌐 Global</option>
+      <option value="us">🇺🇸 US</option>
+      <option value="eu">🇪🇺 EU</option>
+      <option value="asia">🌏 Asia</option>
+    </select>
     <button type="submit">Publish</button>
-    <div class="info">Site HTML is stored on IPFS. The blockchain stores your domain→IPFS address mapping.<br>(No coins, just decentralized mapping!)</div>
+    <div class="info">
+      Uploads files to IPFS and registers the domain mapping in GunDB. <br>
+      Choose a region to publish (simulated “cloud” region). Others can publish/mirror your site in new regions.<br>
+      When visiting, your site will open in a new tab!
+    </div>
   </form>
   <div class="info" style="margin-top:2em;">
-    <b>How it works:</b> Register a domain, upload your HTML to IPFS, and store the mapping on the blockchain (GunDB for demo). Anyone can look up the domain and fetch your site from IPFS.<br>
-    <b>For a real blockchain, swap GunDB for smart contract calls.</b>
+    <b>How it works:</b> Register a domain and upload your files. Your site is uploaded to IPFS and your .lunar domain is mapped to the region + CID in GunDB.<br>
+    Anyone can publish/mirror your site to a new region. <br>
+    When anyone enters your .lunar domain and picks a region, the portal opens a new tab with a viewer that loads your files from IPFS.<br>
+    <b>NO iframes. Sites are always opened in new tabs!</b>
   </div>
   <script>
-    // GUN as our demo "blockchain" (replace with real smart contract for production)
+    // GunDB: domain/region -> file metadata (list of {name, cid, type})
     const gun = Gun();
+
+    // Regions (add more as needed)
+    const REGIONS = {
+      global: "🌐 Global",
+      us: "🇺🇸 US",
+      eu: "🇪🇺 EU",
+      asia: "🌏 Asia"
+    };
 
     // IPFS node
     let ipfs;
@@ -42,65 +67,129 @@
       console.log("IPFS node started");
     })();
 
-    // "Blockchain": domain -> CID mapping
-    function setDomainCID(domain, cid) {
-      gun.get('lunar_blockchain').get(domain).put({ cid: cid });
+    // GunDB mapping: domain+region -> [ {name, cid, type} ]
+    function setDomainRegionBlobs(domain, region, blobs) {
+      gun.get('lunar_registry').get(domain + "::" + region).put({ blobs: JSON.stringify(blobs) });
     }
-    function getDomainCID(domain, cb) {
-      gun.get('lunar_blockchain').get(domain).once(data => cb(data ? data.cid : null));
+    function getDomainRegionBlobs(domain, region, cb) {
+      gun.get('lunar_registry').get(domain + "::" + region).once(data => {
+        if (!data || !data.blobs) return cb([]);
+        try { cb(JSON.parse(data.blobs)); } catch { cb([]); }
+      });
     }
 
-    // Register and upload site
+    // Allow users to register/upload new files for their domain, and set region
     document.getElementById('register-form').onsubmit = async function(e) {
       e.preventDefault();
       const domain = document.getElementById('reg-domain').value.trim().toLowerCase();
-      const html = document.getElementById('reg-html').value;
+      const files = document.getElementById('reg-files').files;
+      const region = document.getElementById('region-publish').value;
       if (!domain.endsWith('.lunar')) {
         alert('Only .lunar domains are supported.');
+        return;
+      }
+      if (!files.length) {
+        alert('Please select at least one file.');
         return;
       }
       if (!ipfs) {
         alert('IPFS node is still starting...');
         return;
       }
-      // Add HTML to IPFS
-      const { cid } = await ipfs.add({ path: 'index.html', content: html });
-      setDomainCID(domain, cid.toString());
-      alert(`Site published! Domain: ${domain} → IPFS CID: ${cid}`);
+      let blobs = [];
+      for (let file of files) {
+        const { cid } = await ipfs.add({ path: file.name, content: file });
+        blobs.push({ name: file.name, cid: cid.toString(), type: file.type });
+      }
+      setDomainRegionBlobs(domain, region, blobs);
+      alert(`Published! Domain: ${domain} in region ${REGIONS[region]} with files: ${blobs.map(b=>b.name).join(', ')}`);
     };
 
-    // Visit domain
+    // Visit: resolve domain+region, fetch blobs from IPFS, open in new tab
     document.getElementById('domain-form').onsubmit = function(e) {
       e.preventDefault();
       const domain = document.getElementById('domain-input').value.trim().toLowerCase();
+      const region = document.getElementById('region-view').value;
       if (!domain.endsWith('.lunar')) {
         alert('Only .lunar domains are supported.');
         return;
       }
-      document.getElementById('site-viewer').innerHTML = 'Looking up domain on blockchain...';
-      getDomainCID(domain, async cid => {
-        if (!cid) {
-          document.getElementById('site-viewer').innerHTML = `<p>No .lunar site registered for <b>${domain}</b>.</p>`;
+      getDomainRegionBlobs(domain, region, async blobs => {
+        if (!blobs.length) {
+          alert(`No files registered for ${domain} in region ${REGIONS[region]}.`);
           return;
         }
-        document.getElementById('site-viewer').innerHTML = `Loading site from IPFS (${cid})...`;
-        try {
-          // Fetch file from IPFS
-          let html = "";
-          for await (const chunk of ipfs.cat(cid)) {
+        // Find HTML file (if any)
+        let htmlBlob = blobs.find(b => b.name.endsWith('.html'));
+        let html = "";
+        if (htmlBlob && ipfs) {
+          for await (const chunk of ipfs.cat(htmlBlob.cid)) {
             html += new TextDecoder().decode(chunk);
           }
-          // Open in a sandboxed iframe
-          const blobUrl = URL.createObjectURL(new Blob([html], {type: "text/html"}));
-          document.getElementById('site-viewer').innerHTML = `
-            <iframe src="${blobUrl}" sandbox="allow-scripts allow-same-origin"></iframe>
-            <div class="info">Loaded from IPFS CID: ${cid}</div>
-            <a href="https://ipfs.io/ipfs/${cid}" target="_blank">View raw on IPFS gateway</a>
-          `;
-        } catch (err) {
-          document.getElementById('site-viewer').innerHTML = `<p>Error loading from IPFS: ${err}</p>`;
         }
+        // Build new tab viewer page as a blob
+        let links = blobs.map(b =>
+          `<a class="blob-link" href="https://ipfs.io/ipfs/${b.cid}" target="_blank">${b.name} (${b.type||'blob'})</a>`
+        ).join('');
+        let viewerHtml = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>${domain} - LunarDomain Viewer (${REGIONS[region]})</title>
+  <style>
+    body { background: #111; color: #fff; font-family: monospace; margin:0; padding:2em;}
+    .blob-link { margin:0.5em 0; display:block; }
+  </style>
+</head>
+<body>
+  <h2>${domain} in ${REGIONS[region]}</h2>
+  ${html ? `<div><a href="#" id="open-site">Open Site (HTML)</a></div>` : ''}
+  <div>
+    <h4>All Files:</h4>
+    ${links}
+  </div>
+  <div class="info">Loaded from IPFS. <a href="#" id="mirror-btn">Mirror to another region</a></div>
+  <script>
+    // Open HTML (if available) as standalone doc
+    ${html ? `
+    document.getElementById('open-site').onclick = function(e) {
+      e.preventDefault();
+      const blobUrl = URL.createObjectURL(new Blob([${JSON.stringify(html)}], {type:'text/html'}));
+      window.open(blobUrl, '_blank');
+    };
+    ` : ''}
+    // Mirror: user picks a region, registers same blobs to that region in GunDB
+    document.getElementById('mirror-btn').onclick = function(e) {
+      e.preventDefault();
+      let region = prompt('Enter region code to mirror to (global/us/eu/asia):');
+      if(!region) return;
+      region = region.trim().toLowerCase();
+      if(!["global","us","eu","asia"].includes(region)) {
+        alert('Invalid region');
+        return;
+      }
+      if(window.opener && window.opener.mirrorToRegion) {
+        window.opener.mirrorToRegion(${JSON.stringify(domain)}, region, ${JSON.stringify(blobs)});
+        alert('Site mirrored to region ' + region.toUpperCase() + '!');
+      } else {
+        alert('Mirroring only works from the original portal page.');
+      }
+    };
+  <\/script>
+</body>
+</html>
+        `;
+        // Open viewer as a blob in a new tab
+        const blob = new Blob([viewerHtml], {type:"text/html"});
+        const url = URL.createObjectURL(blob);
+        window.open(url, '_blank');
       });
+    };
+
+    // Expose for mirroring from viewer tab
+    window.mirrorToRegion = function(domain, region, blobs) {
+      setDomainRegionBlobs(domain, region, blobs);
     };
   </script>
 </body>
